@@ -54,7 +54,10 @@ The GPU endpoint scales to zero, and a cold boot takes about 3 to 7 minutes
   triggers several cold starts, and no VLM call times out while a worker boots.
 - **Use `/layout-parsing/batch`** for bulk work. All files share the warm
   GPU. Each file goes through the official route, so every result is exactly
-  what PaddleX returns. `BATCH_CONCURRENCY` (default 4) files run at a time.
+  what PaddleX returns. `BATCH_CONCURRENCY` (default 4) files run at a time,
+  overlapping on the GPU (`PADDLE_PDX_SERVING_SERIAL_PIPELINE_CALLS=False`).
+- **Closing the connection doesn't cancel work.** PaddleX keeps parsing a
+  request after the client disconnects, so retry with care.
 - **Pre-warm** with `POST /warmup` a few minutes before a known batch.
 - **The endpoint stays warm for 5 minutes** after the last request
   (`idle_timeout=300`). The service assumes the GPU is warm for `WARM_TTL_SECONDS`

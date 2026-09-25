@@ -14,7 +14,10 @@ RUN uv pip install --system --no-cache \
       "torch==2.14.*" "torchvision" \
       --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
 
-ENV PADDLE_PDX_MODEL_SOURCE=huggingface \
+# PaddleX serializes pipeline calls to dodge a Paddle Inference bug; layout runs on
+# PyTorch here, so files of a batch can overlap (verified: identical layouts, ~16% faster)
+ENV PADDLE_PDX_SERVING_SERIAL_PIPELINE_CALLS=False \
+    PADDLE_PDX_MODEL_SOURCE=huggingface \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     HF_HOME=/models/hf \
     PADDLE_PDX_CACHE_HOME=/models/paddlex
