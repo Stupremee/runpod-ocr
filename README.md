@@ -47,4 +47,4 @@ config changes update the same endpoint in place.
 - `runpod_ocr/`: GPU backend definitions and the `runpod-ocr` CLI
 - `services/`: one OCR service per model family
 - `samples/`: German test PDFs
-- `uv run pytest`: unit tests of all services
+- `uv run pytest`: unit tests of all services (GPU-free; each service also has an emulated mode)

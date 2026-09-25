@@ -26,6 +26,9 @@ ENV PADDLE_PDX_SERVING_SERIAL_PIPELINE_CALLS=False \
 RUN python -c "from paddlex import create_model; create_model('PP-DocLayoutV3', engine='transformers', device='cpu')"
 
 WORKDIR /app
-COPY app.py formatting.py pipeline.yaml ./
+COPY *.py pipeline.yaml ./
+# SQLite job store; mount a volume here so jobs survive container restarts
+ENV DATA_DIR=/data
+VOLUME /data
 EXPOSE 8080
 CMD ["python", "app.py"]

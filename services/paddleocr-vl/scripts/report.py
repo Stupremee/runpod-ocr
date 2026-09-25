@@ -1,7 +1,8 @@
-"""Build the HTML verification report from a /layout-parsing/batch response.
+"""Build the HTML verification report from a finished batch of the three samples.
 
-uv run --with pypdfium2 --with pillow services/paddleocr-vl/scripts/report.py out/batch-full.json out/report.html
-(batch run with tableFormat "markdown" and layoutText true)
+curl "localhost:8080/batches/<id>?includeResults=true" > out/batch.json
+uv run --with pypdfium2 --with pillow services/paddleocr-vl/scripts/report.py out/batch.json out/report.html
+(batch of de-rechnung, de-pythagoras, de-maxwell with tableFormat "markdown" and layoutText true)
 """
 
 import base64
@@ -64,10 +65,10 @@ def page_section(name: str, page: int, result: dict) -> str:
 def main() -> None:
     batch, out = json.loads(Path(sys.argv[1]).read_text()), Path(sys.argv[2])
     names = ["de-rechnung", "de-pythagoras", "de-maxwell"]
-    by_name = dict(zip(names, batch["results"]))
+    by_name = dict(zip(names, batch["jobs"]))
     rows = "".join(
         f'<tr><td><a href="{SOURCES[n]}" target="_blank" rel="noopener noreferrer">{n}.pdf</a></td>'
-        f'<td>{len(by_name[n]["result"]["layoutParsingResults"])}</td><td>{by_name[n]["errorMsg"]}</td></tr>'
+        f'<td>{len(by_name[n]["result"]["layoutParsingResults"])}</td><td>{by_name[n]["status"]}</td></tr>'
         for n in names
     )
     legend = " ".join(f'<span style="color:{c}">■ {l}</span>' for l, c in COLORS.items())
@@ -88,7 +89,7 @@ pre.layout{{white-space:pre;overflow-x:auto;font-size:10px}}
 pre{{background:#111;border:1px solid #333;padding:8px;white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:{THUMB_WIDTH * 1.45:.0f}px;overflow:auto;margin:0}}
 </style></head><body>
 <h1>PaddleOCR-VL 1.6 on Runpod: verification</h1>
-<p>Official PaddleX pipeline (PP-DocLayoutV3 layout + PaddleOCR-VL-1.6 on the Runpod vLLM endpoint). One <code>/layout-parsing/batch</code> call, all three documents. Left: page with detected blocks. Request options: <code>tableFormat: "markdown"</code>, <code>layoutText: true</code>. Right: the page's <code>markdown.text</code> (tables converted to Markdown, everything else as PaddleX returned it) and the added <code>layoutText</code>.</p>
+<p>Official PaddleX pipeline (PP-DocLayoutV3 layout + PaddleOCR-VL-1.6 on the Runpod vLLM endpoint). One batch job (<code>POST /batches</code>), all three documents. Left: page with detected blocks. Request options: <code>tableFormat: "markdown"</code>, <code>layoutText: true</code>. Right: the page's <code>markdown.text</code> (tables converted to Markdown, everything else as PaddleX returned it) and the added <code>layoutText</code>.</p>
 <table><tr><th>Test PDF</th><th>Pages</th><th>Status</th></tr>{rows}</table>
 <p class="meta">{legend} <span style="color:#9b9b9b">■ text/other</span></p>
 {sections}

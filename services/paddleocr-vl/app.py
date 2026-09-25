@@ -1,21 +1,20 @@
-"""PaddleOCR-VL 1.6 service: the official PaddleX serving app, with the VLM on Runpod.
+"""PaddleOCR-VL 1.6 service: the official PaddleX pipeline with the VLM on Runpod,
+behind an async job API.
 
 Routes
-  POST /layout-parsing        official PaddleX API, plus two optional fields:
-                                tableFormat: "html" (default) | "markdown"
-                                layoutText:  false (default) | true -> adds
-                                  layoutText (page text laid out like the page)
-                                  to every layoutParsingResults item
-  POST /layout-parsing/batch  {"requests": [<layout-parsing request>, ...]}
-                              -> {"results": [<layout-parsing response>, ...]}, same order
-  POST /warmup                wake the Runpod GPU ahead of a batch; returns once it serves
-  *                           every other PaddleX route (/health, /restructure-pages, ...)
+  POST /jobs, /batches, GET|DELETE /jobs/{id}, /batches/{id}
+                        async processing with webhooks (see api.py)
+  POST /layout-parsing  official PaddleX route, synchronous, plus the
+                        tableFormat / layoutText options (see formatting.py)
+  POST /warmup          wake the Runpod GPU ahead of time
+  *                     every other PaddleX route (/health, ...)
 
-Cold starts: the Runpod endpoint scales to zero. Before any parsing, a shared
-guard makes sure a GPU worker is actually serving (one tiny probe job, awaited
-by every concurrent request), so a batch pays for at most one cold start and no
-VLM call times out while a worker boots. Send work as batches (or call /warmup
-first) and keep batches within the endpoint's idle timeout of each other.
+OCR_BACKEND=emulated runs everything except GPU inference (see emulated.py).
+
+Cold starts: the Runpod endpoint scales to zero. Before parsing, a shared guard
+makes sure a GPU worker is actually serving (one tiny probe job that every
+concurrent caller awaits), so a burst of jobs pays for at most one cold start
+and no VLM call times out while a worker boots.
 """
 
 import asyncio
@@ -32,23 +31,34 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from paddlex import create_pipeline
 from paddlex.inference.serving.basic_serving import create_pipeline_app
+from paddlex.inference.serving.schemas.paddleocr_vl import InferRequest
+from pydantic import ValidationError
 
+import emulated
+from api import create_router
 from formatting import layout_text, tables_to_markdown
+from jobs import JobStore
+from runner import JobRunner
+from webhooks import WebhookSender
 
-ENDPOINT_ID = os.environ["PADDLEOCR_VL_ENDPOINT_ID"]
-API_KEY = os.environ["RUNPOD_API_KEY"]
+# "runpod" (default) or "emulated": a local stub instead of the GPU, for testing
+BACKEND = os.environ.get("OCR_BACKEND", "runpod")
+EMULATED = BACKEND == "emulated"
+ENDPOINT_ID = "" if EMULATED else os.environ["PADDLEOCR_VL_ENDPOINT_ID"]
+API_KEY = "" if EMULATED else os.environ["RUNPOD_API_KEY"]
+PORT = int(os.environ.get("PORT", "8080"))
+MODEL_NAME = "PaddlePaddle/PaddleOCR-VL-1.6"
 # treat the GPU as warm this long after the last VLM traffic; keep below the
 # endpoint's idle_timeout (300s, see runpod_ocr/backends.py)
 WARM_TTL = float(os.environ.get("WARM_TTL_SECONDS", "240"))
 COLD_START_TIMEOUT = float(os.environ.get("COLD_START_TIMEOUT_SECONDS", "900"))
-# files of one batch parsed at the same time; their VLM calls share the warm GPU
-BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", "4"))
+# jobs processed at once; their VLM calls share the warm GPU
+WORKER_CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "4"))
+JOB_MAX_ATTEMPTS = int(os.environ.get("JOB_MAX_ATTEMPTS", "3"))
+RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "7"))
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or None
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 TABLE_FORMATS = ("html", "markdown")
-
-
-def error(status: int, message: str) -> JSONResponse:
-    """Same shape as PaddleX error responses."""
-    return JSONResponse(status_code=status, content={"logId": "", "errorCode": status, "errorMsg": message})
 
 
 class RunpodWarmup:
@@ -90,13 +100,37 @@ class RunpodWarmup:
 def load_config() -> dict[str, Any]:
     config = yaml.safe_load((Path(__file__).parent / "pipeline.yaml").read_text())
     genai = config["SubModules"]["VLRecognition"]["genai_config"]
-    genai["server_url"] = f"https://api.runpod.ai/v2/{ENDPOINT_ID}/openai/v1"
-    genai["client_kwargs"]["api_key"] = API_KEY
+    if EMULATED:  # this service's own stub routes
+        genai["server_url"] = f"http://127.0.0.1:{PORT}/emulated/v1"
+        genai["client_kwargs"]["api_key"] = "emulated"
+    else:
+        genai["server_url"] = f"https://api.runpod.ai/v2/{ENDPOINT_ID}/openai/v1"
+        genai["client_kwargs"]["api_key"] = API_KEY
     return config
 
 
+def split_options(request: dict[str, Any]) -> tuple[dict[str, Any], str, bool]:
+    """Separate this service's options from the PaddleX request."""
+    request = dict(request)
+    return request, request.pop("tableFormat", "html"), request.pop("layoutText", False)
+
+
+def validate(request: dict[str, Any]) -> str | None:
+    """Error message for an invalid layout-parsing request, checked against PaddleX's own schema."""
+    paddle_request, table_format, with_layout_text = split_options(request)
+    if table_format not in TABLE_FORMATS:
+        return f"tableFormat must be one of {TABLE_FORMATS}"
+    if not isinstance(with_layout_text, bool):
+        return "layoutText must be a boolean"
+    try:
+        InferRequest.model_validate(paddle_request)
+    except ValidationError as e:
+        return str(e)
+    return None
+
+
 def postprocess(body: dict[str, Any], table_format: str, with_layout_text: bool) -> dict[str, Any]:
-    """Apply the optional tableFormat/layoutText to a successful PaddleX response."""
+    """Apply tableFormat/layoutText to a successful PaddleX response."""
     for page in (body.get("result") or {}).get("layoutParsingResults", []):
         pruned = page["prunedResult"]
         if with_layout_text:
@@ -113,59 +147,66 @@ def build_app() -> FastAPI:
     config = load_config()
     pipeline = create_pipeline(config=config, device=os.environ.get("DEVICE", "cpu"))
     paddle = create_pipeline_app(pipeline, config)  # official app, unmodified
-    warmup = RunpodWarmup()
-
-    @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI):
-        async with paddle.router.lifespan_context(paddle):  # loads the pipeline wrapper
-            yield
-
-    app = FastAPI(title="PaddleOCR-VL 1.6", lifespan=lifespan)
     paddle_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=paddle), base_url="http://paddle", timeout=None)
+    warmup = emulated.EmulatedWarmup() if EMULATED else RunpodWarmup()
 
     async def parse(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        request = dict(request)
-        table_format = request.pop("tableFormat", "html")
-        with_layout_text = request.pop("layoutText", False)
-        if table_format not in TABLE_FORMATS or not isinstance(with_layout_text, bool):
-            return 422, {"logId": "", "errorCode": 422,
-                         "errorMsg": f"tableFormat must be one of {TABLE_FORMATS}; layoutText must be a boolean"}
-        response = await paddle_client.post("/layout-parsing", json=request)
+        """Run one layout-parsing request through the official route, then apply our options."""
+        paddle_request, table_format, with_layout_text = split_options(request)
+        response = await paddle_client.post("/layout-parsing", json=paddle_request)
         body = response.json()
         if response.status_code == 200:
             body = postprocess(body, table_format, with_layout_text)
         warmup.touch()
         return response.status_code, body
 
-    @app.post("/layout-parsing")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    store = JobStore(str(DATA_DIR / "jobs.db"))
+    sender = WebhookSender(store, WEBHOOK_SECRET)
+    runner = JobRunner(
+        store, parse, warmup, concurrency=WORKER_CONCURRENCY, max_attempts=JOB_MAX_ATTEMPTS, on_finished=sender.wake
+    )
+
+    async def purge_old() -> None:
+        while True:
+            store.purge(older_than=time.time() - RETENTION_DAYS * 86400)
+            await asyncio.sleep(3600)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI):
+        async with paddle.router.lifespan_context(paddle):  # loads the pipeline wrapper
+            if requeued := store.requeue_interrupted():
+                print(f"requeued {requeued} interrupted jobs", flush=True)
+            tasks = [asyncio.create_task(t) for t in (runner.run(), sender.run(), purge_old())]
+            if not WEBHOOK_SECRET:
+                print("WEBHOOK_SECRET not set: webhooks are sent unsigned", flush=True)
+            yield
+            for task in tasks:
+                task.cancel()
+
+    app = FastAPI(title="PaddleOCR-VL 1.6", lifespan=lifespan)
+    if EMULATED:
+        print("OCR_BACKEND=emulated: no GPU inference, VLM answers are canned", flush=True)
+        app.include_router(emulated.create_router(MODEL_NAME))
+    app.include_router(create_router(store, validate=validate, on_submit=runner.wake, on_finished=sender.wake))
+
+    @app.post("/layout-parsing", tags=["sync"])
     async def _layout_parsing(request: dict[str, Any]) -> JSONResponse:
+        if problem := validate(request):
+            return JSONResponse(status_code=422, content={"logId": "", "errorCode": 422, "errorMsg": problem})
         try:
             await warmup.ensure()
         except Exception as e:
-            return error(503, str(e))
+            return JSONResponse(status_code=503, content={"logId": "", "errorCode": 503, "errorMsg": str(e)})
         status, body = await parse(request)
         return JSONResponse(status_code=status, content=body)
 
-    @app.post("/layout-parsing/batch")
-    async def _batch(body: dict[str, list[dict[str, Any]]]) -> JSONResponse:
-        try:
-            await warmup.ensure()  # once for the whole batch
-        except Exception as e:
-            return error(503, str(e))
-        limit = asyncio.Semaphore(BATCH_CONCURRENCY)
-
-        async def one(request: dict[str, Any]) -> dict[str, Any]:
-            async with limit:
-                return (await parse(request))[1]
-
-        return JSONResponse({"results": await asyncio.gather(*(one(r) for r in body["requests"]))})
-
-    @app.post("/warmup")
+    @app.post("/warmup", tags=["sync"])
     async def _warmup() -> JSONResponse:
         try:
             await warmup.ensure()
         except Exception as e:
-            return error(503, str(e))
+            return JSONResponse(status_code=503, content={"error": {"code": "backend_unavailable", "message": str(e)}})
         return JSONResponse({"status": "warm"})
 
     app.mount("/", paddle)  # every other official route
@@ -173,4 +214,4 @@ def build_app() -> FastAPI:
 
 
 if __name__ == "__main__":
-    uvicorn.run(build_app(), host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+    uvicorn.run(build_app(), host="0.0.0.0", port=PORT)

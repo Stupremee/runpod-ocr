@@ -3,5 +3,11 @@ services:
     build: .
     image: paddleocr-vl-service
     ports: ["8080:8080"]
-    env_file: ../../.env  # RUNPOD_API_KEY, PADDLEOCR_VL_ENDPOINT_ID
+    env_file: ../../.env  # RUNPOD_API_KEY, PADDLEOCR_VL_ENDPOINT_ID, WEBHOOK_SECRET
+    environment:
+      OCR_BACKEND: ${OCR_BACKEND:-runpod}  # OCR_BACKEND=emulated: no GPU, canned VLM answers
+    volumes: [jobs:/data]
     restart: unless-stopped
+
+volumes:
+  jobs:
