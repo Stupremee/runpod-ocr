@@ -1,11 +1,15 @@
 """PaddleOCR-VL 1.6 service: the official PaddleX serving app, with the VLM on Runpod.
 
 Routes
-  POST /layout-parsing        official PaddleX API, unchanged (one file per request)
+  POST /layout-parsing        official PaddleX API, plus two optional fields:
+                                tableFormat: "html" (default) | "markdown"
+                                layoutText:  false (default) | true -> adds
+                                  layoutText (page text laid out like the page)
+                                  to every layoutParsingResults item
   POST /layout-parsing/batch  {"requests": [<layout-parsing request>, ...]}
                               -> {"results": [<layout-parsing response>, ...]}, same order
   POST /warmup                wake the Runpod GPU ahead of a batch; returns once it serves
-  GET  /health                official PaddleX health check
+  *                           every other PaddleX route (/health, /restructure-pages, ...)
 
 Cold starts: the Runpod endpoint scales to zero. Before any parsing, a shared
 guard makes sure a GPU worker is actually serving (one tiny probe job, awaited
@@ -15,6 +19,7 @@ first) and keep batches within the endpoint's idle timeout of each other.
 """
 
 import asyncio
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -23,10 +28,12 @@ from typing import Any
 import httpx
 import uvicorn
 import yaml
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from paddlex import create_pipeline
 from paddlex.inference.serving.basic_serving import create_pipeline_app
+
+from formatting import layout_text, tables_to_markdown
 
 ENDPOINT_ID = os.environ["PADDLEOCR_VL_ENDPOINT_ID"]
 API_KEY = os.environ["RUNPOD_API_KEY"]
@@ -36,7 +43,12 @@ WARM_TTL = float(os.environ.get("WARM_TTL_SECONDS", "240"))
 COLD_START_TIMEOUT = float(os.environ.get("COLD_START_TIMEOUT_SECONDS", "900"))
 # files of one batch parsed at the same time; their VLM calls share the warm GPU
 BATCH_CONCURRENCY = int(os.environ.get("BATCH_CONCURRENCY", "4"))
-PARSE_PATHS = ("/layout-parsing", "/layout-parsing/batch", "/warmup")
+TABLE_FORMATS = ("html", "markdown")
+
+
+def error(status: int, message: str) -> JSONResponse:
+    """Same shape as PaddleX error responses."""
+    return JSONResponse(status_code=status, content={"logId": "", "errorCode": status, "errorMsg": message})
 
 
 class RunpodWarmup:
@@ -83,42 +95,80 @@ def load_config() -> dict[str, Any]:
     return config
 
 
+def postprocess(body: dict[str, Any], table_format: str, with_layout_text: bool) -> dict[str, Any]:
+    """Apply the optional tableFormat/layoutText to a successful PaddleX response."""
+    for page in (body.get("result") or {}).get("layoutParsingResults", []):
+        pruned = page["prunedResult"]
+        if with_layout_text:
+            page["layoutText"] = layout_text(pruned)
+        if table_format == "markdown":
+            page["markdown"]["text"] = tables_to_markdown(page["markdown"]["text"])
+            for block in pruned["parsing_res_list"]:
+                if block["block_label"] == "table":
+                    block["block_content"] = tables_to_markdown(block["block_content"]).strip()
+    return body
+
+
 def build_app() -> FastAPI:
     config = load_config()
     pipeline = create_pipeline(config=config, device=os.environ.get("DEVICE", "cpu"))
-    app = create_pipeline_app(pipeline, config)
+    paddle = create_pipeline_app(pipeline, config)  # official app, unmodified
     warmup = RunpodWarmup()
 
-    @app.middleware("http")
-    async def _warm_backend(request: Request, call_next):
-        if request.method == "POST" and request.url.path in PARSE_PATHS:
-            try:
-                await warmup.ensure()
-            except Exception as e:
-                # same shape as PaddleX error responses
-                return JSONResponse(status_code=503, content={"logId": "", "errorCode": 503, "errorMsg": str(e)})
-        response = await call_next(request)
-        if request.url.path in PARSE_PATHS:
-            warmup.touch()
-        return response
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI):
+        async with paddle.router.lifespan_context(paddle):  # loads the pipeline wrapper
+            yield
 
-    @app.post("/warmup")
-    async def _warmup() -> dict[str, str]:
-        return {"status": "warm"}
+    app = FastAPI(title="PaddleOCR-VL 1.6", lifespan=lifespan)
+    paddle_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=paddle), base_url="http://paddle", timeout=None)
+
+    async def parse(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        request = dict(request)
+        table_format = request.pop("tableFormat", "html")
+        with_layout_text = request.pop("layoutText", False)
+        if table_format not in TABLE_FORMATS or not isinstance(with_layout_text, bool):
+            return 422, {"logId": "", "errorCode": 422,
+                         "errorMsg": f"tableFormat must be one of {TABLE_FORMATS}; layoutText must be a boolean"}
+        response = await paddle_client.post("/layout-parsing", json=request)
+        body = response.json()
+        if response.status_code == 200:
+            body = postprocess(body, table_format, with_layout_text)
+        warmup.touch()
+        return response.status_code, body
+
+    @app.post("/layout-parsing")
+    async def _layout_parsing(request: dict[str, Any]) -> JSONResponse:
+        try:
+            await warmup.ensure()
+        except Exception as e:
+            return error(503, str(e))
+        status, body = await parse(request)
+        return JSONResponse(status_code=status, content=body)
 
     @app.post("/layout-parsing/batch")
-    async def _batch(body: dict[str, list[dict[str, Any]]]) -> dict[str, list[Any]]:
+    async def _batch(body: dict[str, list[dict[str, Any]]]) -> JSONResponse:
+        try:
+            await warmup.ensure()  # once for the whole batch
+        except Exception as e:
+            return error(503, str(e))
         limit = asyncio.Semaphore(BATCH_CONCURRENCY)
-        # each item goes through the official route in-process: identical responses
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://ocr", timeout=None) as client:
 
-            async def parse(item: dict[str, Any]) -> Any:
-                async with limit:
-                    return (await client.post("/layout-parsing", json=item)).json()
+        async def one(request: dict[str, Any]) -> dict[str, Any]:
+            async with limit:
+                return (await parse(request))[1]
 
-            return {"results": await asyncio.gather(*(parse(item) for item in body["requests"]))}
+        return JSONResponse({"results": await asyncio.gather(*(one(r) for r in body["requests"]))})
 
+    @app.post("/warmup")
+    async def _warmup() -> JSONResponse:
+        try:
+            await warmup.ensure()
+        except Exception as e:
+            return error(503, str(e))
+        return JSONResponse({"status": "warm"})
+
+    app.mount("/", paddle)  # every other official route
     return app
 
 

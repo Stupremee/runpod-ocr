@@ -33,7 +33,7 @@ The official PaddleX routes, plus a batch route and a warm-up route:
 
 | Route | Body | Returns |
 | --- | --- | --- |
-| `POST /layout-parsing` | [PaddleX request](https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/PaddleOCR-VL.html): `{"file": <url or base64>, "fileType": 0 (PDF) or 1 (image), ...options}` | PaddleX response: `result.layoutParsingResults[]` with `prunedResult` (blocks, bboxes, labels) and `markdown.text` per page |
+| `POST /layout-parsing` | [PaddleX request](https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/PaddleOCR-VL.html): `{"file": <url or base64>, "fileType": 0 (PDF) or 1 (image), ...options}`, plus `tableFormat` and `layoutText` (below) | PaddleX response: `result.layoutParsingResults[]` with `prunedResult` (blocks, bboxes, labels) and `markdown.text` per page |
 | `POST /layout-parsing/batch` | `{"requests": [<layout-parsing request>, ...]}` | `{"results": [<layout-parsing response>, ...]}`, same order |
 | `POST /warmup` | none | `{"status": "warm"}` once a GPU worker is serving |
 | `GET /health` | none | PaddleX health check |
@@ -42,6 +42,20 @@ All PaddleX options work per request (`useLayoutDetection`, `useChartRecognition
 `useSealRecognition`, `useOcrForImageBlock`, `markdownIgnoreLabels`, `maxPixels`,
 `prettifyMarkdown`, `restructurePages`, ...). Pass `"visualize": false` unless you
 want the annotated images back.
+
+### Extra request options
+
+These are added on top of PaddleX and work on `/layout-parsing` and per item in `/batch`:
+
+- `tableFormat`: `"html"` (default, what PaddleX returns) or `"markdown"`. With
+  `markdown`, tables in `markdown.text` and table blocks in `prunedResult` become
+  GitHub Markdown tables. Markdown can't express merged cells, so a merged cell's
+  text goes in its first slot and the rest stay empty. `html` is lossless.
+- `layoutText`: `false` (default) or `true`. Adds `layoutText` to every page: plain
+  text placed on a character grid by block position, like `pdftotext -layout`.
+  Columns, side-by-side blocks and captions keep their place, and tables come out
+  as aligned columns. Line breaks inside a block are re-wrapped to its width
+  (block bboxes only, no per-line positions).
 
 ## Batching and cold starts
 

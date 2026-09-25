@@ -26,6 +26,6 @@ ENV PADDLE_PDX_SERVING_SERIAL_PIPELINE_CALLS=False \
 RUN python -c "from paddlex import create_model; create_model('PP-DocLayoutV3', engine='transformers', device='cpu')"
 
 WORKDIR /app
-COPY app.py pipeline.yaml ./
+COPY app.py formatting.py pipeline.yaml ./
 EXPOSE 8080
 CMD ["python", "app.py"]
