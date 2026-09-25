@@ -1,16 +1,18 @@
-"""GPU inference backends: one scale-to-zero vLLM endpoint per VLM.
+"""GPU inference backends on Runpod: one scale-to-zero vLLM endpoint per model.
 
 Flash provisions these in image mode (`runpod-ocr backend up`) and tracks them
-by name in `.flash/resources.pkl`. The OCR worker reaches them through Runpod's
-OpenAI-compatible passthrough.
+by name in `.flash/resources.pkl`. The OCR service calls them through Runpod's
+OpenAI-compatible passthrough: https://api.runpod.ai/v2/<id>/openai/v1
+
+Scaling is tuned for batches: one worker takes many requests at once (vLLM
+batches them on the GPU), stays warm between documents, and a second worker
+only starts when the queue is genuinely backed up.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from runpod_flash import CudaVersion, Endpoint, GpuGroup
-
-from .schema import ModelName
+from runpod_flash import CudaVersion, Endpoint, GpuGroup, ServerlessScalerType
 
 # vLLM 0.28 on CUDA 13.0
 VLLM_WORKER_IMAGE = "runpod/worker-v1-vllm:v2.27.1"
@@ -20,7 +22,7 @@ VLLM_WORKER_IMAGE = "runpod/worker-v1-vllm:v2.27.1"
 class VllmBackend:
     name: str
     hf_repo: str
-    # env var holding the provisioned endpoint id, read by the OCR worker
+    # env var (in .env / the OCR service) holding the provisioned endpoint id
     endpoint_id_env: str
     # extra worker-vllm env vars; each becomes a `vllm serve` flag
     vllm_env: Mapping[str, str] = field(default_factory=dict)
@@ -31,19 +33,25 @@ class VllmBackend:
             image=VLLM_WORKER_IMAGE,
             # ~1B models fit easily in 24 GB; A5000/3090/L4 first, 4090 as fallback
             gpu=[GpuGroup.AMPERE_24, GpuGroup.ADA_24],
-            workers=(0, 3),
-            idle_timeout=60,
+            workers=(0, 2),
+            # keep the GPU warm across a batch and short gaps between batches
+            idle_timeout=300,
+            # add a second worker only after jobs wait 30s; each new worker is a cold start
+            scaler_type=ServerlessScalerType.QUEUE_DELAY,
+            scaler_value=30,
             execution_timeout_ms=600_000,
             min_cuda_version=CudaVersion.V13_0,
-            env={"MODEL_NAME": self.hf_repo, "MAX_MODEL_LEN": "16384", **self.vllm_env},
+            env={
+                "MODEL_NAME": self.hf_repo,
+                "MAX_MODEL_LEN": "16384",
+                # jobs one worker pulls concurrently; vLLM batches them on the GPU
+                "MAX_CONCURRENCY": "128",
+                **self.vllm_env,
+            },
         )
 
-    @staticmethod
-    def openai_url(endpoint_id: str) -> str:
-        return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 
-
-BACKENDS: dict[ModelName, VllmBackend] = {
+BACKENDS: dict[str, VllmBackend] = {
     "paddleocr-vl-1.6": VllmBackend(
         name="ocr-paddleocr-vl-1-6",
         hf_repo="PaddlePaddle/PaddleOCR-VL-1.6",
