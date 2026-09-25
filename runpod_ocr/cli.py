@@ -1,5 +1,5 @@
 """runpod-ocr backend up [MODEL]: provision (or update) a vLLM backend on Runpod
-and record its endpoint id in .env for the OCR service."""
+and record its endpoint id in .env for the model's service."""
 
 import argparse
 import asyncio

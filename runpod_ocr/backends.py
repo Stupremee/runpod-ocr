@@ -1,7 +1,7 @@
 """GPU inference backends on Runpod: one scale-to-zero vLLM endpoint per model.
 
 Flash provisions these in image mode (`runpod-ocr backend up`) and tracks them
-by name in `.flash/resources.pkl`. The OCR service calls them through Runpod's
+by name in `.flash/resources.pkl`. The OCR services call them through Runpod's
 OpenAI-compatible passthrough: https://api.runpod.ai/v2/<id>/openai/v1
 
 Scaling is tuned for batches: one worker takes many requests at once (vLLM
@@ -22,7 +22,7 @@ VLLM_WORKER_IMAGE = "runpod/worker-v1-vllm:v2.27.1"
 class VllmBackend:
     name: str
     hf_repo: str
-    # env var (in .env / the OCR service) holding the provisioned endpoint id
+    # env var (in .env, read by the model's service) holding the provisioned endpoint id
     endpoint_id_env: str
     # extra worker-vllm env vars; each becomes a `vllm serve` flag
     vllm_env: Mapping[str, str] = field(default_factory=dict)

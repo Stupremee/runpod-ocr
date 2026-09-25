@@ -1,6 +1,6 @@
 """Build the HTML verification report from a /layout-parsing/batch response.
 
-uv run --with pypdfium2 --with pillow scripts/report.py out/batch-full.json out/report.html
+uv run --with pypdfium2 --with pillow services/paddleocr-vl/scripts/report.py out/batch-full.json out/report.html
 (batch run with tableFormat "markdown" and layoutText true)
 """
 

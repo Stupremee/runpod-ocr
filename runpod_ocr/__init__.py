@@ -1,1 +1,1 @@
-"""Runpod GPU backends for the OCR service (see `backends.py`)."""
+"""Runpod GPU backends for the OCR services: one vLLM endpoint per model (see `backends.py`)."""

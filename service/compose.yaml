@@ -1,6 +1,0 @@
-services:
-  ocr:
-    build: .
-    ports: ["8080:8080"]
-    env_file: ../.env  # RUNPOD_API_KEY, PADDLEOCR_VL_ENDPOINT_ID
-    restart: unless-stopped
