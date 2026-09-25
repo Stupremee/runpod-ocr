@@ -1,5 +1,10 @@
 # OCR on Runpod
 
+> [!WARNING]
+> This is a small internal service for my own OCR pipeline in
+> [Paperless-ngx](https://docs.paperless-ngx.com). It isn't a supported product:
+> expect rough edges, breaking changes, and no support.
+
 OCR models run as **one scale-to-zero Runpod serverless endpoint per model**
 (vLLM, OpenAI-compatible). Each model family gets its **own service**, which
 runs that family's official pipeline and API and calls its endpoint for GPU
