@@ -141,3 +141,10 @@ The service needs about 2 to 8 GB of RAM depending on `WORKER_CONCURRENCY`.
 - `pipeline.yaml`: official PaddleX config, pointed at the Runpod backend
 - `tests/`: unit tests (`uv run pytest` from the repo root)
 - `scripts/report.py`: HTML verification report
+- `deploy/nixos-rome.md`: NixOS deployment guide (module + auto-updates) for the nix repo
+
+## Image
+
+CI (`.github/workflows/paddleocr-vl-image.yml`) runs the tests and publishes
+`ghcr.io/stupremee/paddleocr-vl` on every push to `main`, tagged `main` (moving)
+and `sha-<commit>`.
