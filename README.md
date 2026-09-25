@@ -25,7 +25,7 @@ backend ──HTTP──▶ paddleocr-vl   PaddleX pipeline  ──▶   ocr-pad
 
 `runpod_ocr/backends.py` defines the endpoints: one worker-vllm image, one fixed
 model per endpoint, tuned for batches (scale to zero, 128 concurrent requests per
-worker, 5 min keep-warm, a second worker only after 30s of queueing).
+worker, 60s keep-warm, a second worker only after 30s of queueing).
 Separate endpoints mean each model scales, sizes its GPU and cold-starts on its
 own, and two models can run at the same time.
 

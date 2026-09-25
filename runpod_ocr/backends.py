@@ -34,8 +34,9 @@ class VllmBackend:
             # ~1B models fit easily in 24 GB; A5000/3090/L4 first, 4090 as fallback
             gpu=[GpuGroup.AMPERE_24, GpuGroup.ADA_24],
             workers=(0, 2),
-            # keep the GPU warm across a batch and short gaps between batches
-            idle_timeout=300,
+            # short keep-warm: a batch keeps the worker busy anyway, and every idle
+            # second is billed (the tail dominates the cost of small, spread-out jobs)
+            idle_timeout=60,
             # add a second worker only after jobs wait 30s; each new worker is a cold start
             scaler_type=ServerlessScalerType.QUEUE_DELAY,
             scaler_value=30,

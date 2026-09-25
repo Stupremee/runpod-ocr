@@ -16,7 +16,7 @@ from fastapi import APIRouter
 
 COLD_START = float(os.environ.get("EMULATED_COLD_START_SECONDS", "5"))
 LATENCY = float(os.environ.get("EMULATED_LATENCY_SECONDS", "0.2"))
-IDLE_TIMEOUT = 300  # like the real endpoint: cold again after 5 idle minutes
+IDLE_TIMEOUT = 60  # like the real endpoint: cold again after a minute idle
 
 # PaddleOCR-VL task prompt -> an answer shaped like the real model's output
 _ANSWERS = {

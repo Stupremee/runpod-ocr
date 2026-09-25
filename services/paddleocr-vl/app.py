@@ -49,8 +49,8 @@ API_KEY = "" if EMULATED else os.environ["RUNPOD_API_KEY"]
 PORT = int(os.environ.get("PORT", "8080"))
 MODEL_NAME = "PaddlePaddle/PaddleOCR-VL-1.6"
 # treat the GPU as warm this long after the last VLM traffic; keep below the
-# endpoint's idle_timeout (300s, see runpod_ocr/backends.py)
-WARM_TTL = float(os.environ.get("WARM_TTL_SECONDS", "240"))
+# endpoint's idle_timeout (60s, see runpod_ocr/backends.py)
+WARM_TTL = float(os.environ.get("WARM_TTL_SECONDS", "45"))
 COLD_START_TIMEOUT = float(os.environ.get("COLD_START_TIMEOUT_SECONDS", "900"))
 # jobs processed at once; their VLM calls share the warm GPU
 WORKER_CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "4"))

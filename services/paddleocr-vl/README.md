@@ -105,8 +105,8 @@ The GPU endpoint scales to zero, and a cold boot takes about 3 to 7 minutes.
   no VLM call times out while a worker boots.
 - **Jobs run oldest first**, `WORKER_CONCURRENCY` at a time, so a batch's documents
   run together while the GPU is warm. Their VLM calls overlap on the GPU.
-- **The endpoint stays warm for 5 minutes** after the last request. Jobs submitted
-  within that window don't cold start again. `POST /warmup` wakes it ahead of time.
+- **The endpoint stays warm for 60 seconds** after the last request. Jobs submitted
+  within that window don't cold start again, so send related work together (or as a batch). `POST /warmup` wakes it ahead of time.
 - **One GPU worker takes up to 128 requests at once.** A second worker only starts
   after 30s of queueing. Max 2 workers.
 
@@ -120,7 +120,7 @@ The GPU endpoint scales to zero, and a cold boot takes about 3 to 7 minutes.
 | `WORKER_CONCURRENCY` | 4 | jobs processed at once; each needs about 1 to 2 GB of RAM |
 | `JOB_MAX_ATTEMPTS` | 3 | attempts for retryable failures |
 | `RETENTION_DAYS` | 7 | delete finished jobs after this |
-| `WARM_TTL_SECONDS` | 240 | skip the warm-up probe this long after the last traffic; keep below the endpoint's 300s idle timeout |
+| `WARM_TTL_SECONDS` | 45 | skip the warm-up probe this long after the last traffic; keep below the endpoint's 60s idle timeout |
 | `COLD_START_TIMEOUT_SECONDS` | 900 | give up waiting for a GPU worker after this |
 | `EMULATED_COLD_START_SECONDS`, `EMULATED_LATENCY_SECONDS` | 5, 0.2 | emulated backend timings |
 | `DEVICE` | `cpu` | layout model device (`gpu:0` if the host has a GPU) |
@@ -129,7 +129,8 @@ The GPU endpoint scales to zero, and a cold boot takes about 3 to 7 minutes.
 ## Costs
 
 GPU: RTX A5000/3090/L4 class at $0.69/hr, or RTX 4090 at $1.10/hr, billed per second
-while a worker is up, including the 5 minute idle tail. Emulated mode costs nothing.
+while a worker is up, including the 60 second idle tail. A burst costs about $0.06
+fixed (cold start and idle tail) plus about $0.44 per 1,000 pages. Emulated mode costs nothing.
 The service needs about 2 to 8 GB of RAM depending on `WORKER_CONCURRENCY`.
 
 ## Files
